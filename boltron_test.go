@@ -11,7 +11,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/boltdb/bolt"
 	"github.com/dc0d/goroutines"
 	"github.com/rs/xid"
 	"github.com/stretchr/testify/assert"
@@ -21,7 +20,7 @@ var (
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
-	db     *bolt.DB
+	db     *DB
 )
 
 func TestMain(m *testing.M) {
@@ -33,7 +32,7 @@ func TestMain(m *testing.M) {
 
 	fdb := filepath.Join(os.TempDir(), "boltrondb-"+xid.New().String())
 	var err error
-	db, err = bolt.Open(fdb, 0774, nil)
+	db, err = Open(fdb, 0774, nil)
 	if err != nil {
 		fmt.Println(err)
 		return
@@ -96,7 +95,7 @@ func TestEngineDummy(t *testing.T) {
 
 	for i := 0; i < 6; i++ {
 		i := i
-		db.Update(func(tx *bolt.Tx) error {
+		db.Update(func(tx *Tx) error {
 			d := &data{
 				Name: fmt.Sprintf("N%03d", i),
 				Age:  i,
@@ -108,7 +107,7 @@ func TestEngineDummy(t *testing.T) {
 			}
 
 			// call engine in each Update
-			e.Put(tx, []byte(d.Name), d)
+			e.Put(tx.tx, []byte(d.Name), d)
 
 			js, _ := json.Marshal(d)
 			b.Put([]byte(d.Name), js)
@@ -119,7 +118,7 @@ func TestEngineDummy(t *testing.T) {
 
 	for i := 0; i < 3; i++ {
 		i := i
-		db.Update(func(tx *bolt.Tx) error {
+		db.Update(func(tx *Tx) error {
 			d := &data{
 				Name: fmt.Sprintf("N%03d", i),
 				Age:  i,
@@ -130,7 +129,7 @@ func TestEngineDummy(t *testing.T) {
 				return err
 			}
 
-			e.Delete(tx, []byte(d.Name), d)
+			e.Delete(tx.tx, []byte(d.Name))
 
 			b.Delete([]byte(d.Name))
 
@@ -138,7 +137,7 @@ func TestEngineDummy(t *testing.T) {
 		})
 	}
 
-	db.View(func(tx *bolt.Tx) error {
+	db.View(func(tx *Tx) error {
 		b := tx.Bucket([]byte(MakeName(vewName)))
 		b.ForEach(func(key []byte, value []byte) error {
 			assert.True(t,
