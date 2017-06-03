@@ -32,7 +32,7 @@ func TestMain(m *testing.M) {
 
 	fdb := filepath.Join(os.TempDir(), "boltrondb-"+xid.New().String())
 	var err error
-	db, err = Open(fdb, 0774, nil)
+	db, err = Open(marshaler, fdb, 0774, nil)
 	if err != nil {
 		fmt.Println(err)
 		return
@@ -52,7 +52,14 @@ func TestErrors(t *testing.T) {
 	var _ error = Errors([]error{})
 }
 
-type data struct {
+func marshaler(v interface{}) (data []byte, err error) {
+	return json.Marshal(v)
+}
+
+type Model struct{}
+
+type person struct {
+	ID   string
 	Name string `json:"name"`
 	Age  int    `json:"age,string"`
 }

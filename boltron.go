@@ -23,9 +23,10 @@ type Index func(key []byte, value interface{}) ([]KV, error)
 
 // Errors
 var (
-	ErrNilBucket = errors.New("ErrNilBucket")
-	ErrNilTx     = errors.New("ErrNilTx")
-	ErrNilDB     = errors.New("ErrNilDB")
+	ErrNilBucket    = errors.New("ErrNilBucket")
+	ErrNilTx        = errors.New("ErrNilTx")
+	ErrNilDB        = errors.New("ErrNilDB")
+	ErrNilMarshaler = errors.New("ErrNilMarshaler")
 )
 
 //-----------------------------------------------------------------------------
@@ -117,12 +118,21 @@ func (b *Bucket) FillPercent(v ...float64) float64 {
 }
 
 func (b *Bucket) Put(key []byte, doc interface{}) error {
+	bdata, err := b.tx.db.marshaler(doc)
+	if err != nil {
+		return err
+	}
+	err = b.buk.Put(key, bdata)
+	if err != nil {
+		return err
+	}
+
 	b.tx.db.m.RLock()
 	defer b.tx.db.m.RUnlock()
 	var resErr Errors
 	for mapKey, mapVal := range b.tx.db.repo {
 		mapKey, mapVal := mapKey, mapVal
-		b, err := b.tx.CreateBucketIfNotExists([]byte(mapKey))
+		bmap, err := b.tx.CreateBucketIfNotExists([]byte(mapKey))
 		if err != nil {
 			resErr = append(resErr, err)
 			continue
@@ -138,12 +148,12 @@ func (b *Bucket) Put(key []byte, doc interface{}) error {
 				continue
 			}
 			gkey := append(IndexPrefix(), []byte(kv.Key)...)
-			err = b.buk.Put(append(key, gkey...), gkey)
+			err = bmap.buk.Put(append(key, gkey...), gkey)
 			if err != nil {
 				resErr = append(resErr, err)
 				continue
 			}
-			err = b.buk.Put(gkey, kv.Value)
+			err = bmap.buk.Put(gkey, kv.Value)
 			if err != nil {
 				resErr = append(resErr, err)
 				continue
@@ -154,24 +164,29 @@ func (b *Bucket) Put(key []byte, doc interface{}) error {
 }
 
 func (b *Bucket) Delete(key []byte) error {
+	err := b.buk.Delete(key)
+	if err != nil {
+		return err
+	}
+
 	b.tx.db.m.RLock()
 	defer b.tx.db.m.RUnlock()
 	var resErr Errors
 	for mapKey := range b.tx.db.repo {
 		mapKey := mapKey
-		b, err := b.tx.CreateBucketIfNotExists([]byte(mapKey))
+		bmap, err := b.tx.CreateBucketIfNotExists([]byte(mapKey))
 		if err != nil {
 			resErr = append(resErr, err)
 			continue
 		}
 		prefix := key
-		c := b.Cursor()
+		c := bmap.Cursor()
 		for k, v := c.Seek(prefix); k != nil && bytes.HasPrefix(k, prefix); k, v = c.Next() {
-			err = b.buk.Delete(k)
+			err = bmap.buk.Delete(k)
 			if err != nil {
 				resErr = append(resErr, err)
 			}
-			err = b.buk.Delete(v)
+			err = bmap.buk.Delete(v)
 			if err != nil {
 				resErr = append(resErr, err)
 			}
@@ -307,28 +322,32 @@ func (tx *Tx) DropIndex(name string) error {
 //-----------------------------------------------------------------------------
 
 type DB struct {
-	db   *bolt.DB
-	repo map[string]Index
-	m    sync.RWMutex
-	// marshaler func(v interface{}) (data []byte, err error)
+	db        *bolt.DB
+	repo      map[string]Index
+	m         sync.RWMutex
+	marshaler func(v interface{}) (data []byte, err error)
 }
 
-func NewDB(db *bolt.DB) *DB {
+func NewDB(db *bolt.DB, marshaler func(v interface{}) (data []byte, err error)) *DB {
 	if db == nil {
 		panic(ErrNilDB)
 	}
+	if marshaler == nil {
+		panic(ErrNilMarshaler)
+	}
 	return &DB{
-		db:   db,
-		repo: make(map[string]Index),
+		db:        db,
+		repo:      make(map[string]Index),
+		marshaler: marshaler,
 	}
 }
 
-func Open(path string, mode os.FileMode, options *bolt.Options) (*DB, error) {
+func Open(marshaler func(v interface{}) (data []byte, err error), path string, mode os.FileMode, options *bolt.Options) (*DB, error) {
 	_db, err := bolt.Open(path, mode, options)
 	if err != nil {
 		return nil, err
 	}
-	return NewDB(_db), nil
+	return NewDB(_db, marshaler), nil
 }
 
 func (db *DB) Batch(fn func(*Tx) error) error {
