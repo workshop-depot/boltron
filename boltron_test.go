@@ -52,20 +52,14 @@ func TestErrors(t *testing.T) {
 	var _ error = Errors([]error{})
 }
 
-func TestMakeName(t *testing.T) {
-	assert.Equal(t, "__books__", MakeName("books"))
-	assert.Equal(t, "__books__", MakeName("______books__"))
-}
-
 type data struct {
 	Name string `json:"name"`
 	Age  int    `json:"age,string"`
 }
 
 func TestEngineDummy(t *testing.T) {
-	vewName := "wrapped"
-	e := NewEngine()
-	e.PutMap(vewName, func(key []byte, value interface{}) []KV {
+	viewName := "wrapped"
+	db.PutIndex(viewName, func(key []byte, value interface{}) ([]KV, error) {
 		var res []KV
 
 		var val struct {
@@ -90,7 +84,7 @@ func TestEngineDummy(t *testing.T) {
 		}
 		res = append(res, kv)
 
-		return res
+		return res, nil
 	})
 
 	for i := 0; i < 6; i++ {
@@ -106,9 +100,7 @@ func TestEngineDummy(t *testing.T) {
 				return err
 			}
 
-			// call engine in each Update
-			e.Put(tx.tx, []byte(d.Name), d)
-
+			b.PutDoc([]byte(d.Name), d)
 			js, _ := json.Marshal(d)
 			b.Put([]byte(d.Name), js)
 
@@ -129,8 +121,7 @@ func TestEngineDummy(t *testing.T) {
 				return err
 			}
 
-			e.Delete(tx.tx, []byte(d.Name))
-
+			b.DeleteDoc([]byte(d.Name))
 			b.Delete([]byte(d.Name))
 
 			return nil
@@ -138,7 +129,7 @@ func TestEngineDummy(t *testing.T) {
 	}
 
 	db.View(func(tx *Tx) error {
-		b := tx.Bucket([]byte(MakeName(vewName)))
+		b := tx.Bucket([]byte(viewName))
 		b.ForEach(func(key []byte, value []byte) error {
 			assert.True(t,
 				bytes.HasPrefix(key, []byte("N003ツJSONED")) ||
