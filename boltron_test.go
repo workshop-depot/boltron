@@ -100,9 +100,10 @@ func TestEngineDummy(t *testing.T) {
 				return err
 			}
 
-			b.PutDoc([]byte(d.Name), d)
-			js, _ := json.Marshal(d)
-			b.Put([]byte(d.Name), js)
+			// b.PutDoc([]byte(d.Name), d)
+			// js, _ := json.Marshal(d)
+			// b.Put([]byte(d.Name), js)
+			b.Put([]byte(d.Name), d)
 
 			return nil
 		})
@@ -121,7 +122,7 @@ func TestEngineDummy(t *testing.T) {
 				return err
 			}
 
-			b.DeleteDoc([]byte(d.Name))
+			// b.DeleteDoc([]byte(d.Name))
 			b.Delete([]byte(d.Name))
 
 			return nil

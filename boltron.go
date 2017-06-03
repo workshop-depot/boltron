@@ -65,10 +65,6 @@ func (b *Bucket) CreateBucketIfNotExists(key []byte) (*Bucket, error) {
 	return NewBucket(b.tx, _b), nil
 }
 
-func (b *Bucket) Delete(key []byte) error {
-	return b.buk.Delete(key)
-}
-
 func (b *Bucket) DeleteBucket(key []byte) error {
 	return b.buk.DeleteBucket(key)
 }
@@ -121,11 +117,6 @@ func (b *Bucket) FillPercent(v ...float64) float64 {
 }
 
 func (b *Bucket) Put(key []byte, doc interface{}) error {
-	// return b.buk.Put(key, value)
-	// }
-
-	// // PutDoc puts index(key, value) tuple in indexes
-	// func (b *Bucket) PutDoc(key []byte, doc interface{}) error {
 	b.tx.db.m.RLock()
 	defer b.tx.db.m.RUnlock()
 	var resErr Errors
@@ -162,7 +153,7 @@ func (b *Bucket) Put(key []byte, doc interface{}) error {
 	return resErr
 }
 
-func (b *Bucket) DeleteDoc(key []byte) error {
+func (b *Bucket) Delete(key []byte) error {
 	b.tx.db.m.RLock()
 	defer b.tx.db.m.RUnlock()
 	var resErr Errors
@@ -176,11 +167,11 @@ func (b *Bucket) DeleteDoc(key []byte) error {
 		prefix := key
 		c := b.Cursor()
 		for k, v := c.Seek(prefix); k != nil && bytes.HasPrefix(k, prefix); k, v = c.Next() {
-			err = b.Delete(k)
+			err = b.buk.Delete(k)
 			if err != nil {
 				resErr = append(resErr, err)
 			}
-			err = b.Delete(v)
+			err = b.buk.Delete(v)
 			if err != nil {
 				resErr = append(resErr, err)
 			}
