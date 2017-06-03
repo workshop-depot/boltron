@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dc0d/boltron/boltwrapper"
 	"github.com/dc0d/goroutines"
 	"github.com/rs/xid"
 	"github.com/stretchr/testify/assert"
@@ -20,7 +21,7 @@ var (
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
-	db     *DB
+	db     *boltwrapper.DB
 )
 
 func TestMain(m *testing.M) {
@@ -32,7 +33,7 @@ func TestMain(m *testing.M) {
 
 	fdb := filepath.Join(os.TempDir(), "boltrondb-"+xid.New().String())
 	var err error
-	db, err = Open(marshaler, fdb, 0774, nil)
+	db, err = boltwrapper.Open(marshaler, fdb, 0774, nil)
 	if err != nil {
 		fmt.Println(err)
 		return
@@ -53,20 +54,22 @@ func TestErrors(t *testing.T) {
 }
 
 func marshaler(v interface{}) (data []byte, err error) {
+	switch x := v.(type) {
+	case []byte:
+		return x, nil
+	}
 	return json.Marshal(v)
 }
 
-type Model struct{}
-
-type person struct {
-	ID   string
+type data struct {
 	Name string `json:"name"`
 	Age  int    `json:"age,string"`
 }
 
 func TestEngineDummy(t *testing.T) {
-	viewName := "wrapped"
-	db.PutIndex(viewName, func(key []byte, value interface{}) ([]KV, error) {
+	viewName := "view1"
+	eg := NewEngine(db)
+	eg.PutIndex(viewName, func(key []byte, value interface{}) ([]KV, error) {
 		var res []KV
 
 		var val struct {
@@ -96,7 +99,7 @@ func TestEngineDummy(t *testing.T) {
 
 	for i := 0; i < 6; i++ {
 		i := i
-		db.Update(func(tx *Tx) error {
+		err := db.Update(func(tx *boltwrapper.Tx) error {
 			d := &data{
 				Name: fmt.Sprintf("N%03d", i),
 				Age:  i,
@@ -107,18 +110,16 @@ func TestEngineDummy(t *testing.T) {
 				return err
 			}
 
-			// b.PutDoc([]byte(d.Name), d)
-			// js, _ := json.Marshal(d)
-			// b.Put([]byte(d.Name), js)
 			b.Put([]byte(d.Name), d)
 
 			return nil
 		})
+		assert.Nil(t, err)
 	}
 
 	for i := 0; i < 3; i++ {
 		i := i
-		db.Update(func(tx *Tx) error {
+		err := db.Update(func(tx *boltwrapper.Tx) error {
 			d := &data{
 				Name: fmt.Sprintf("N%03d", i),
 				Age:  i,
@@ -134,9 +135,10 @@ func TestEngineDummy(t *testing.T) {
 
 			return nil
 		})
+		assert.Nil(t, err)
 	}
 
-	db.View(func(tx *Tx) error {
+	verr := db.View(func(tx *boltwrapper.Tx) error {
 		b := tx.Bucket([]byte(viewName))
 		b.ForEach(func(key []byte, value []byte) error {
 			assert.True(t,
@@ -150,4 +152,70 @@ func TestEngineDummy(t *testing.T) {
 		})
 		return nil
 	})
+	assert.Nil(t, verr)
+}
+
+func TestEngineDummy1(t *testing.T) {
+	viewName := "view1"
+	eg := NewEngine(db)
+	eg.PutIndex(viewName, func(key []byte, value interface{}) ([]KV, error) {
+		var res []KV
+
+		var val struct {
+			Tag xid.ID
+			Doc interface{}
+		}
+		val.Tag = xid.New()
+		val.Doc = value
+
+		newValue, _ := json.Marshal(val)
+		newKey := append([]byte("JSONED:"), key...)
+		kv := KV{
+			Value: newValue,
+			Key:   newKey,
+		}
+		res = append(res, kv)
+		newKey = append(newKey, ':')
+		newKey = append(newKey, []byte(fmt.Sprintf("%d", time.Now().Unix()))...)
+		kv = KV{
+			Key:   newKey,
+			Value: newValue,
+		}
+		res = append(res, kv)
+
+		return res, nil
+	})
+
+	defer goroutines.New().
+		WaitGo(time.Second * 90).
+		Go(func() { wg.Wait() })
+
+	q := make(chan int, 66)
+	for i := 0; i < 600; i++ {
+		i := i
+		q <- i
+		goroutines.New().
+			WaitGroup(&wg).
+			Go(func() {
+				defer func() {
+					<-q
+				}()
+				err := db.Update(func(tx *boltwrapper.Tx) error {
+					d := &data{
+						Name: fmt.Sprintf("N%03d", i),
+						Age:  i,
+					}
+
+					b, err := tx.CreateBucketIfNotExists([]byte("buk"))
+					if err != nil {
+						return err
+					}
+
+					b.Put([]byte(d.Name), d)
+
+					return nil
+				})
+				assert.Nil(t, err)
+			})
+	}
 }
