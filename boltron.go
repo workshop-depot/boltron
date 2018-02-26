@@ -2,131 +2,288 @@ package boltron
 
 import (
 	"bytes"
-	"errors"
+	"encoding/binary"
 	"sync"
 
-	"github.com/dc0d/boltron/boltwrapper"
+	"github.com/boltdb/bolt"
+	"github.com/pkg/errors"
 )
 
 //-----------------------------------------------------------------------------
 
-// Errors
-var (
-	ErrIgnored = errors.New("ErrIgnored")
-)
-
-// KV == (key, value) tuple
-type KV struct{ Key, Value []byte }
-
-// Index if a document does not belong in an index, must return ErrIgnored
-//
-// is map part as in (CouchDB) map/reduce (sense)
-type Index func(key []byte, value interface{}) ([]KV, error)
-
-//-----------------------------------------------------------------------------
-
-type Engine struct {
-	db   *boltwrapper.DB
-	repo map[string]Index
-	m    sync.RWMutex
+// DB .
+type DB struct {
+	*bolt.DB
+	indexes map[string]*Index
+	m       sync.RWMutex
 }
 
-func NewEngine(db *boltwrapper.DB) *Engine {
-	if db == nil {
-		panic(boltwrapper.ErrNilDB)
+// New .
+func New(bdb *bolt.DB) *DB {
+	db := &DB{
+		DB:      bdb,
+		indexes: make(map[string]*Index),
 	}
-	res := &Engine{
-		db:   db,
-		repo: make(map[string]Index),
+	return db
+}
+
+// Batch .
+func (db *DB) Batch(fn func(*Tx) error) error {
+	return db.DB.Batch(func(tx *bolt.Tx) error {
+		return fn(newTx(tx, db))
+	})
+}
+
+// Begin .
+func (db *DB) Begin(writable bool) (*Tx, error) {
+	btx, err := db.DB.Begin(writable)
+	if err != nil {
+		return nil, err
 	}
-	db.OnPut = res.onPut
-	db.OnDelete = res.onDelete
+	return newTx(btx, db), err
+}
+
+// Update .
+func (db *DB) Update(fn func(*Tx) error) error {
+	return db.DB.Update(func(tx *bolt.Tx) error {
+		return fn(newTx(tx, db))
+	})
+}
+
+// View .
+func (db *DB) View(fn func(*Tx) error) error {
+	return db.DB.View(func(tx *bolt.Tx) error {
+		return fn(newTx(tx, db))
+	})
+}
+
+// AddIndex TODO: build the index
+func (db *DB) AddIndex(indexes ...*Index) error {
+	func() {
+		db.m.Lock()
+		defer db.m.Unlock()
+		for _, v := range indexes {
+			db.indexes[v.name] = v
+		}
+	}()
+	db.m.RLock()
+	defer db.m.RUnlock()
+	return db.Update(func(tx *Tx) error {
+		for _, v := range db.indexes {
+			if _, err := tx.CreateBucketIfNotExists([]byte(v.name)); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+//-----------------------------------------------------------------------------
+
+// Tx .
+type Tx struct {
+	*bolt.Tx
+	db *DB
+}
+
+func newTx(tx *bolt.Tx, db *DB) *Tx {
+	return &Tx{Tx: tx, db: db}
+}
+
+// Bucket .
+func (tx *Tx) Bucket(name []byte) *Bucket {
+	return newBucket(tx.Tx.Bucket(name), tx, string(name))
+}
+
+// CreateBucket .
+func (tx *Tx) CreateBucket(name []byte) (*Bucket, error) {
+	_bk, err := tx.Tx.CreateBucket(name)
+	if err != nil {
+		return nil, err
+	}
+	return newBucket(_bk, tx, string(name)), nil
+}
+
+// CreateBucketIfNotExists .
+func (tx *Tx) CreateBucketIfNotExists(name []byte) (*Bucket, error) {
+	_bk, err := tx.Tx.CreateBucketIfNotExists(name)
+	if err != nil {
+		return nil, err
+	}
+	return newBucket(_bk, tx, string(name)), nil
+}
+
+// ForEach .
+func (tx *Tx) ForEach(fn func(name []byte, b *Bucket) error) error {
+	return tx.Tx.ForEach(func(name []byte, b *bolt.Bucket) error {
+		return fn(name, newBucket(b, tx, ""))
+	})
+}
+
+//-----------------------------------------------------------------------------
+
+// Bucket .
+type Bucket struct {
+	*bolt.Bucket
+	tx   *Tx
+	name string
+}
+
+func newBucket(bk *bolt.Bucket, tx *Tx, name string) *Bucket {
+	res := &Bucket{Bucket: bk, tx: tx}
+	if name != "" {
+		res.name = name
+	}
 	return res
 }
 
-func (eg *Engine) PutIndex(name string, m Index) {
-	if m == nil {
-		return
+// Delete TODO: delete from indexes
+func (bk *Bucket) Delete(key []byte) error {
+	bk.tx.db.m.RLock()
+	defer bk.tx.db.m.RUnlock()
+	if bk.isIndex() {
+		return ErrModifyIndex
 	}
-	eg.m.Lock()
-	defer eg.m.Unlock()
-	eg.repo[name] = m
+	return bk.Bucket.Delete(key)
 }
 
-func (eg *Engine) DropIndex(tx *boltwrapper.Tx, name string) error {
-	eg.m.Lock()
-	defer eg.m.Unlock()
-	err := tx.DeleteBucket([]byte(name))
+// Put .
+func (bk *Bucket) Put(key []byte, value []byte) error {
+	bk.tx.db.m.RLock()
+	defer bk.tx.db.m.RUnlock()
+	if bk.isIndex() {
+		return ErrModifyIndex
+	}
+	for _, v := range bk.tx.db.indexes {
+		parts := v.selector(key, value)
+		if len(parts) == 0 {
+			continue
+		}
+		var km [][]byte
+		for _, vp := range parts {
+			if len(vp) == 0 {
+				continue
+			}
+			km = append(km, vp)
+		}
+		ixpart := bytes.Join(km, []byte(":"))
+		key2part := bytes.Join([][]byte{key, ixpart}, []byte(":"))
+		part2key := bytes.Join([][]byte{ixpart, key}, []byte(":"))
+		ixbk := bk.tx.Bucket([]byte(v.name))
+		if ixbk == nil {
+			return errors.WithMessage(ErrIndexNotFound, v.name)
+		}
+
+		// delete prev
+		c := ixbk.Bucket.Cursor()
+		var toDelete [][]byte
+		for k, v := c.Seek(key); k != nil && bytes.HasPrefix(k, key); k, v = c.Next() {
+			toDelete = append(toDelete, k, v)
+		}
+		for _, v := range toDelete {
+			ixbk.Bucket.Delete(v)
+		}
+
+		if err := ixbk.Bucket.Put(key2part, part2key); err != nil {
+			return err
+		}
+		if err := ixbk.Bucket.Put(part2key, key); err != nil {
+			return err
+		}
+	}
+	return bk.Bucket.Put(key, value)
+}
+
+// Tx .
+func (bk *Bucket) Tx() *Tx { return bk.tx }
+
+func (bk *Bucket) isIndex() bool {
+	_, ok := bk.tx.db.indexes[bk.name]
+	return ok
+}
+
+//-----------------------------------------------------------------------------
+
+// ToSlice v must be []byte, string, Name, Byter or a fixed width struct.
+func ToSlice(v interface{}) ([]byte, error) {
+	switch b := v.(type) {
+	case []byte:
+		return b, nil
+	case string:
+		return []byte(b), nil
+	case Name:
+		return []byte(b), nil
+	case Byter:
+		return b.Bytes(), nil
+	}
+	var buf bytes.Buffer
+	if err := binary.Write(&buf, binary.BigEndian, v); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+// Byter .
+type Byter interface {
+	Bytes() []byte
+}
+
+//-----------------------------------------------------------------------------
+
+// Name uses an string and provides []byte when needed.
+// Storing []byte in a variable is problematic.
+type Name string
+
+// Bytes .
+func (n Name) Bytes() []byte { return []byte(n) }
+
+//-----------------------------------------------------------------------------
+
+// KeyMaker .
+type KeyMaker struct {
+	key [][]byte
+}
+
+func (k *KeyMaker) Write(v interface{}) error {
+	b, err := ToSlice(v)
 	if err != nil {
 		return err
 	}
-	delete(eg.repo, name)
+	k.key = append(k.key, b)
 	return nil
 }
 
-func (eg *Engine) onPut(tx *boltwrapper.Tx, key []byte, doc interface{}) error {
-	eg.m.RLock()
-	defer eg.m.RUnlock()
-	var resErr Errors
-	for mapKey, mapVal := range eg.repo {
-		mapKey, mapVal := mapKey, mapVal
-		bmap, err := tx.CreateBucketIfNotExists([]byte(mapKey))
-		if err != nil {
-			resErr = append(resErr, err)
-			continue
-		}
-		kvList, err := mapVal(key, doc)
-		if err == ErrIgnored {
-			continue
-		}
-		if err != nil {
-			resErr = append(resErr, err)
-			continue
-		}
-		for _, kv := range kvList {
-			kv := kv
-			if len(kv.Key) == 0 {
-				continue
-			}
-			gkey := append(IndexPrefix(), []byte(kv.Key)...)
-			err = bmap.BoltBucket().Put(append(key, gkey...), gkey)
-			if err != nil {
-				resErr = append(resErr, err)
-				continue
-			}
-			err = bmap.BoltBucket().Put(gkey, kv.Value)
-			if err != nil {
-				resErr = append(resErr, err)
-				continue
-			}
-		}
-	}
-	return resErr
+// Bytes .
+func (k KeyMaker) Bytes(sep []byte) []byte {
+	return bytes.Join(k.key, sep)
 }
 
-func (eg *Engine) onDelete(tx *boltwrapper.Tx, key []byte) error {
-	eg.m.RLock()
-	defer eg.m.RUnlock()
-	var resErr Errors
-	for mapKey := range eg.repo {
-		mapKey := mapKey
-		bmap, err := tx.CreateBucketIfNotExists([]byte(mapKey))
-		if err != nil {
-			resErr = append(resErr, err)
-			continue
-		}
-		prefix := key
-		c := bmap.Cursor()
-		for k, v := c.Seek(prefix); k != nil && bytes.HasPrefix(k, prefix); k, v = c.Next() {
-			err = bmap.BoltBucket().Delete(k)
-			if err != nil {
-				resErr = append(resErr, err)
-			}
-			err = bmap.BoltBucket().Delete(v)
-			if err != nil {
-				resErr = append(resErr, err)
-			}
-		}
-	}
-	return resErr
+//-----------------------------------------------------------------------------
+
+// Index provide either gjson pattern(s) or selector (not both)
+type Index struct {
+	name     string
+	selector func(k, v []byte) [][]byte
 }
+
+// NewIndex .
+func NewIndex(name string, selector func(k, v []byte) [][]byte) *Index {
+	if name == "" {
+		panic("name must be provided")
+	}
+	return &Index{name: name, selector: selector}
+}
+
+//-----------------------------------------------------------------------------
+
+// errors
+var (
+	ErrModifyIndex   error = sentinelErr("modifying indexes are not allowed")
+	ErrIndexNotFound error = sentinelErr("index not found")
+)
+
+type sentinelErr string
+
+func (v sentinelErr) Error() string { return string(v) }
+
+//-----------------------------------------------------------------------------
