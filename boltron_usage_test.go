@@ -23,6 +23,7 @@ type data struct {
 
 var (
 	db *boltron.DB
+	at = time.Date(2018, 1, 1, 1, 1, 1, 1, time.Local)
 )
 
 func TestMain(m *testing.M) {
@@ -40,7 +41,7 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-func TestAddIndexes(t *testing.T) {
+func TestUsage01(t *testing.T) {
 	assert := assert.New(t)
 
 	ix := boltron.NewIndex("names", func(k, v []byte) [][]byte {
@@ -73,13 +74,13 @@ func TestAddIndexes(t *testing.T) {
 			d.ID = k
 			d.Name = fmt.Sprintf("name:%d", i)
 			d.Score = float64(i)
-			d.At = time.Date(2018, 1, 1, 1, 1, 1, 1, time.Local)
+			d.At = at
 			js, err := json.Marshal(&d)
 			if err != nil {
 				return err
 			}
 			if err := bk.Put([]byte(k), []byte(js)); err != nil {
-				return nil
+				return err
 			}
 		}
 		return nil
@@ -90,7 +91,12 @@ func TestAddIndexes(t *testing.T) {
 		bk := tx.Bucket([]byte("scores"))
 		c := bk.Cursor()
 		for k, v := c.First(); k != nil; k, v = c.Next() {
-			t.Log(string(k), string(v))
+			var d data
+			assert.NoError(json.Unmarshal(v, &d))
+			assert.Equal(at, d.At)
+			assert.Condition(func() bool {
+				return 0 <= d.Score && d.Score <= 2 && len(d.Name) > 0
+			})
 		}
 		return nil
 	})
@@ -100,9 +106,67 @@ func TestAddIndexes(t *testing.T) {
 		bk := tx.Bucket([]byte("names"))
 		c := bk.Cursor()
 		for k, v := c.First(); k != nil; k, v = c.Next() {
-			t.Log(string(k), string(v))
+			switch string(k) {
+			case "201801010101010700:data:00000000000000000000":
+			case "201801010101010700:data:00000000000000000001":
+			case "201801010101010700:data:00000000000000000002":
+			case "data:00000000000000000000:201801010101010700":
+			case "data:00000000000000000001:201801010101010700":
+			case "data:00000000000000000002:201801010101010700":
+			default:
+				assert.Fail("wrong key")
+			}
+			switch string(v) {
+			case "201801010101010700:data:00000000000000000000":
+			case "201801010101010700:data:00000000000000000001":
+			case "201801010101010700:data:00000000000000000002":
+			case "data:00000000000000000000":
+			case "data:00000000000000000001":
+			case "data:00000000000000000002":
+			default:
+				assert.Fail("wrong key")
+			}
 		}
 		return nil
 	})
 	assert.NoError(err)
+
+	err = db.Update(func(tx *boltron.Tx) error {
+		bk := tx.Bucket([]byte("scores"))
+		for i := 0; i < 3; i++ {
+			i := i
+			k := fmt.Sprintf("data:%020d", i)
+			if err := bk.Delete([]byte(k)); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	assert.NoError(err)
+
+	count := 0
+	err = db.View(func(tx *boltron.Tx) error {
+		bk := tx.Bucket([]byte("scores"))
+		c := bk.Cursor()
+		for k, _ := c.First(); k != nil; k, _ = c.Next() {
+			count++
+		}
+		return nil
+	})
+	assert.NoError(err)
+	assert.Equal(0, count)
+
+	count = 0
+
+	err = db.View(func(tx *boltron.Tx) error {
+		bk := tx.Bucket([]byte("names"))
+		c := bk.Cursor()
+		for k, v := c.First(); k != nil; k, v = c.Next() {
+			t.Log(string(k), string(v))
+			count++
+		}
+		return nil
+	})
+	assert.NoError(err)
+	assert.Equal(0, count)
 }

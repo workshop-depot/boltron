@@ -137,12 +137,26 @@ func newBucket(bk *bolt.Bucket, tx *Tx, name string) *Bucket {
 	return res
 }
 
-// Delete TODO: delete from indexes
+// Delete .
 func (bk *Bucket) Delete(key []byte) error {
 	bk.tx.db.m.RLock()
 	defer bk.tx.db.m.RUnlock()
 	if bk.isIndex() {
 		return ErrModifyIndex
+	}
+	for _, v := range bk.tx.db.indexes {
+		ixbk := bk.tx.Bucket([]byte(v.name))
+		if ixbk == nil {
+			return errors.WithMessage(ErrIndexNotFound, v.name)
+		}
+		c := ixbk.Bucket.Cursor()
+		var toDelete [][]byte
+		for k, v := c.Seek(key); k != nil && bytes.HasPrefix(k, key); k, v = c.Next() {
+			toDelete = append(toDelete, k, v)
+		}
+		for _, v := range toDelete {
+			ixbk.Bucket.Delete(v)
+		}
 	}
 	return bk.Bucket.Delete(key)
 }
