@@ -89,6 +89,9 @@ func (db *DB) AddIndex(indexes ...*Index) error {
 			if _, err := tx.CreateBucketIfNotExists([]byte(v.name)); err != nil {
 				return err
 			}
+			if _, err := tx.CreateBucketIfNotExists([]byte(v.name + bkkeyssuffix)); err != nil {
+				return err
+			}
 		}
 		return nil
 	})
@@ -207,13 +210,28 @@ func (bk *Bucket) Delete(key []byte) error {
 		if indexBucket == nil {
 			return errors.WithMessage(ErrIndexNotFound, v.name)
 		}
-		c := indexBucket.Bucket.Cursor()
-		var toDelete [][]byte
-		for k, v := c.Seek(key); k != nil && bytes.HasPrefix(k, key); k, v = c.Next() {
-			toDelete = append(toDelete, k, v)
+		keysBucket := bk.tx.Bucket([]byte(v.name + bkkeyssuffix))
+		if keysBucket == nil {
+			return errors.WithMessage(ErrIndexNotFound, v.name)
 		}
-		for _, v := range toDelete {
-			indexBucket.Bucket.Delete(v) // TODO: (ERR-A) error ignored (should it be checked? because of the possibility of double delete)
+
+		// TODO: (ERR-A) error ignored (should it be checked? because of the possibility of double delete)
+
+		// delete prev
+		c := keysBucket.Bucket.Cursor()
+		var (
+			toDeleteKeys    [][]byte
+			toDeleteIndexes [][]byte
+		)
+		for k, v := c.Seek(key); k != nil && bytes.HasPrefix(k, key); k, v = c.Next() {
+			toDeleteKeys = append(toDeleteKeys, k)
+			toDeleteIndexes = append(toDeleteIndexes, v)
+		}
+		for _, v := range toDeleteIndexes {
+			indexBucket.Bucket.Delete(v) // TODO: (ERR-A)
+		}
+		for _, v := range toDeleteKeys {
+			keysBucket.Bucket.Delete(v) // TODO: (ERR-A)
 		}
 	}
 	return bk.Bucket.Delete(key)
@@ -234,49 +252,67 @@ func (bk *Bucket) Put(key []byte, value []byte) error {
 
 func (bk *Bucket) upsertIndex(key []byte, value []byte) error {
 	for _, v := range bk.tx.db.indexes {
-		selectedSegments := v.selector(key, value)
-		if len(selectedSegments) == 0 {
+		emittedIndexes := v.selector(key, value)
+		if len(emittedIndexes) == 0 {
 			continue
 		}
-		var filteredSegments [][]byte
-		for _, vp := range selectedSegments {
+		var filtered [][]byte
+		for _, vp := range emittedIndexes {
 			if len(vp) == 0 {
 				continue
 			}
-			filteredSegments = append(filteredSegments, vp)
+			filtered = append(filtered, vp)
 		}
-		indexSegments := bytes.Join(filteredSegments, sep())
-		key2seg := bytes.Join([][]byte{key, indexSegments}, sep())
-		seg2key := bytes.Join([][]byte{indexSegments, key}, sep())
+		emittedIndexes = filtered
+		if len(emittedIndexes) == 0 {
+			continue
+		}
 		indexBucket := bk.tx.Bucket([]byte(v.name))
 		if indexBucket == nil {
 			return errors.WithMessage(ErrIndexNotFound, v.name)
 		}
+		keysBucket := bk.tx.Bucket([]byte(v.name + bkkeyssuffix))
+		if keysBucket == nil {
+			return errors.WithMessage(ErrIndexNotFound, v.name)
+		}
+		for _, vix := range emittedIndexes {
+			key2seg := bytes.Join([][]byte{key, vix}, []byte(Sep))
+			seg2key := bytes.Join([][]byte{vix, key}, []byte(Sep))
 
-		// delete prev
-		c := indexBucket.Bucket.Cursor()
-		var toDelete [][]byte
-		for k, v := c.Seek(key); k != nil && bytes.HasPrefix(k, key); k, v = c.Next() {
-			toDelete = append(toDelete, k, v)
-		}
-		for _, v := range toDelete {
-			indexBucket.Bucket.Delete(v) // TODO: (ERR-A)
-		}
+			// delete prev
+			c := keysBucket.Bucket.Cursor()
+			var (
+				toDeleteKeys    [][]byte
+				toDeleteIndexes [][]byte
+			)
+			for k, v := c.Seek(key); k != nil && bytes.HasPrefix(k, key); k, v = c.Next() {
+				toDeleteKeys = append(toDeleteKeys, k)
+				toDeleteIndexes = append(toDeleteIndexes, v)
+			}
+			for _, v := range toDeleteIndexes {
+				indexBucket.Bucket.Delete(v) // TODO: (ERR-A)
+			}
+			for _, v := range toDeleteKeys {
+				keysBucket.Bucket.Delete(v) // TODO: (ERR-A)
+			}
 
-		if err := indexBucket.Bucket.Put(key2seg, seg2key); err != nil {
-			return err
-		}
-		if err := indexBucket.Bucket.Put(seg2key, key); err != nil {
-			return err
+			if err := keysBucket.Bucket.Put(key2seg, seg2key); err != nil {
+				return err
+			}
+			if err := indexBucket.Bucket.Put(seg2key, key); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
 }
 
-func sep() []byte {
-	sep := ":"
-	return []byte(sep)
-}
+// constants
+const (
+	Sep = ":"
+
+	bkkeyssuffix = "_keys"
+)
 
 // Tx .
 func (bk *Bucket) Tx() *Tx { return bk.tx }
