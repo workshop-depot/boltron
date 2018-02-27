@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/boltdb/bolt"
 	"github.com/dc0d/boltron"
 	"github.com/stretchr/testify/assert"
 )
@@ -30,11 +29,14 @@ func TestMain(m *testing.M) {
 	fp := filepath.Join(os.TempDir(), "boltron_test.db")
 	defer os.Remove(fp)
 
-	_db, err := bolt.Open(fp, 0777, &bolt.Options{Timeout: time.Second, InitialMmapSize: 1024 * 1024})
+	opt := &boltron.Options{}
+	opt.Timeout = time.Second
+	opt.InitialMmapSize = 1024 * 1024
+	_db, err := boltron.Open(fp, 0777, opt)
 	if err != nil {
 		panic(err)
 	}
-	db = boltron.New(_db)
+	db = _db
 	defer db.Close()
 
 	code := m.Run()

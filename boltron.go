@@ -3,6 +3,7 @@ package boltron
 import (
 	"bytes"
 	"encoding/binary"
+	"os"
 	"sync"
 
 	"github.com/boltdb/bolt"
@@ -18,13 +19,28 @@ type DB struct {
 	m       sync.RWMutex
 }
 
-// New .
-func New(bdb *bolt.DB) *DB {
+// Open creates and opens a database at the given path.
+// If the file does not exist then it will be created automatically.
+// Passing in nil options will cause Bolt to open the database with the default options.
+func Open(path string, mode os.FileMode, options *Options) (*DB, error) {
+	var opt *bolt.Options
+	if options != nil {
+		opt = &options.Options
+	}
+	_db, err := bolt.Open(path, mode, opt)
+	if err != nil {
+		return nil, err
+	}
 	db := &DB{
-		DB:      bdb,
+		DB:      _db,
 		indexes: make(map[string]*Index),
 	}
-	return db
+	return db, nil
+}
+
+// Options represents the options that can be set when opening a database.
+type Options struct {
+	bolt.Options
 }
 
 // Batch .
@@ -76,6 +92,11 @@ func (db *DB) AddIndex(indexes ...*Index) error {
 		}
 		return nil
 	})
+}
+
+// RebuildIndex .
+func (db *DB) RebuildIndex(name string) error {
+	panic("N/A")
 }
 
 //-----------------------------------------------------------------------------
