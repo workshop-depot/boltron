@@ -96,7 +96,44 @@ func (db *DB) AddIndex(indexes ...*Index) error {
 
 // RebuildIndex .
 func (db *DB) RebuildIndex(name string) error {
-	panic("N/A")
+	var allBuckets []string
+	err := db.DB.View(func(tx *bolt.Tx) error {
+		return tx.ForEach(func(name []byte, b *bolt.Bucket) error {
+			allBuckets = append(allBuckets, string(append([]byte{}, name...)))
+			return nil
+		})
+	})
+	if err != nil {
+		return err
+	}
+ALL_BUCKETS:
+	for _, vn := range allBuckets {
+		for _, v := range db.indexes {
+			if vn == v.name {
+				continue ALL_BUCKETS
+			}
+		}
+		// TODO: must get partitioned to some 100 records on each transaction
+		err := db.Update(func(tx *Tx) error {
+			orig := tx.Bucket([]byte(vn))
+			if orig == nil {
+				return nil
+			}
+			c := orig.Cursor()
+			for k, v := c.First(); k != nil; k, v = c.Next() {
+				k := append([]byte{}, k...)
+				v := append([]byte{}, v...)
+				if err := orig.upsertIndex(k, v); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 //-----------------------------------------------------------------------------
@@ -166,17 +203,17 @@ func (bk *Bucket) Delete(key []byte) error {
 		return ErrModifyIndex
 	}
 	for _, v := range bk.tx.db.indexes {
-		ixbk := bk.tx.Bucket([]byte(v.name))
-		if ixbk == nil {
+		indexBucket := bk.tx.Bucket([]byte(v.name))
+		if indexBucket == nil {
 			return errors.WithMessage(ErrIndexNotFound, v.name)
 		}
-		c := ixbk.Bucket.Cursor()
+		c := indexBucket.Bucket.Cursor()
 		var toDelete [][]byte
 		for k, v := c.Seek(key); k != nil && bytes.HasPrefix(k, key); k, v = c.Next() {
 			toDelete = append(toDelete, k, v)
 		}
 		for _, v := range toDelete {
-			ixbk.Bucket.Delete(v)
+			indexBucket.Bucket.Delete(v) // TODO: (ERR-A) error ignored (should it be checked? because of the possibility of double delete)
 		}
 	}
 	return bk.Bucket.Delete(key)
@@ -189,44 +226,56 @@ func (bk *Bucket) Put(key []byte, value []byte) error {
 	if bk.isIndex() {
 		return ErrModifyIndex
 	}
+	if err := bk.upsertIndex(key, value); err != nil {
+		return err
+	}
+	return bk.Bucket.Put(key, value)
+}
+
+func (bk *Bucket) upsertIndex(key []byte, value []byte) error {
 	for _, v := range bk.tx.db.indexes {
-		parts := v.selector(key, value)
-		if len(parts) == 0 {
+		selectedSegments := v.selector(key, value)
+		if len(selectedSegments) == 0 {
 			continue
 		}
-		var km [][]byte
-		for _, vp := range parts {
+		var filteredSegments [][]byte
+		for _, vp := range selectedSegments {
 			if len(vp) == 0 {
 				continue
 			}
-			km = append(km, vp)
+			filteredSegments = append(filteredSegments, vp)
 		}
-		ixpart := bytes.Join(km, []byte(":"))
-		key2part := bytes.Join([][]byte{key, ixpart}, []byte(":"))
-		part2key := bytes.Join([][]byte{ixpart, key}, []byte(":"))
-		ixbk := bk.tx.Bucket([]byte(v.name))
-		if ixbk == nil {
+		indexSegments := bytes.Join(filteredSegments, sep())
+		key2seg := bytes.Join([][]byte{key, indexSegments}, sep())
+		seg2key := bytes.Join([][]byte{indexSegments, key}, sep())
+		indexBucket := bk.tx.Bucket([]byte(v.name))
+		if indexBucket == nil {
 			return errors.WithMessage(ErrIndexNotFound, v.name)
 		}
 
 		// delete prev
-		c := ixbk.Bucket.Cursor()
+		c := indexBucket.Bucket.Cursor()
 		var toDelete [][]byte
 		for k, v := c.Seek(key); k != nil && bytes.HasPrefix(k, key); k, v = c.Next() {
 			toDelete = append(toDelete, k, v)
 		}
 		for _, v := range toDelete {
-			ixbk.Bucket.Delete(v)
+			indexBucket.Bucket.Delete(v) // TODO: (ERR-A)
 		}
 
-		if err := ixbk.Bucket.Put(key2part, part2key); err != nil {
+		if err := indexBucket.Bucket.Put(key2seg, seg2key); err != nil {
 			return err
 		}
-		if err := ixbk.Bucket.Put(part2key, key); err != nil {
+		if err := indexBucket.Bucket.Put(seg2key, key); err != nil {
 			return err
 		}
 	}
-	return bk.Bucket.Put(key, value)
+	return nil
+}
+
+func sep() []byte {
+	sep := ":"
+	return []byte(sep)
 }
 
 // Tx .
