@@ -12,6 +12,22 @@ import (
 
 //-----------------------------------------------------------------------------
 
+// Options represents the options that can be set when opening a database.
+type Options = bolt.Options
+
+// Stats represents statistics about the database.
+type Stats = bolt.Stats
+
+const (
+	// MaxKeySize is the maximum length of a key, in bytes.
+	MaxKeySize = bolt.MaxKeySize
+
+	// MaxValueSize is the maximum length of a value, in bytes.
+	MaxValueSize = bolt.MaxValueSize
+)
+
+//-----------------------------------------------------------------------------
+
 // DB .
 type DB struct {
 	*bolt.DB
@@ -25,7 +41,7 @@ type DB struct {
 func Open(path string, mode os.FileMode, options *Options) (*DB, error) {
 	var opt *bolt.Options
 	if options != nil {
-		opt = &options.Options
+		opt = options
 	}
 	_db, err := bolt.Open(path, mode, opt)
 	if err != nil {
@@ -36,11 +52,6 @@ func Open(path string, mode os.FileMode, options *Options) (*DB, error) {
 		indexes: make(map[string]*Index),
 	}
 	return db, nil
-}
-
-// Options represents the options that can be set when opening a database.
-type Options struct {
-	bolt.Options
 }
 
 // Batch .
@@ -73,7 +84,7 @@ func (db *DB) View(fn func(*Tx) error) error {
 	})
 }
 
-// AddIndex TODO: build the index
+// AddIndex adds the indexs
 func (db *DB) AddIndex(indexes ...*Index) error {
 	func() {
 		db.m.Lock()
@@ -153,7 +164,11 @@ func newTx(tx *bolt.Tx, db *DB) *Tx {
 
 // Bucket .
 func (tx *Tx) Bucket(name []byte) *Bucket {
-	return newBucket(tx.Tx.Bucket(name), tx, string(name))
+	bk := tx.Tx.Bucket(name)
+	if bk == nil {
+		return nil
+	}
+	return newBucket(bk, tx, string(name))
 }
 
 // CreateBucket .
@@ -174,6 +189,11 @@ func (tx *Tx) CreateBucketIfNotExists(name []byte) (*Bucket, error) {
 	return newBucket(_bk, tx, string(name)), nil
 }
 
+// DeleteBucket .
+func (tx *Tx) DeleteBucket(name []byte) error {
+	return tx.Tx.DeleteBucket(name)
+}
+
 // ForEach .
 func (tx *Tx) ForEach(fn func(name []byte, b *Bucket) error) error {
 	return tx.Tx.ForEach(func(name []byte, b *bolt.Bucket) error {
@@ -181,21 +201,70 @@ func (tx *Tx) ForEach(fn func(name []byte, b *Bucket) error) error {
 	})
 }
 
+// DB .
+func (tx *Tx) DB() *DB {
+	return tx.db
+}
+
 //-----------------------------------------------------------------------------
+
+// OrigBucket .
+type OrigBucket = *bolt.Bucket
 
 // Bucket .
 type Bucket struct {
-	*bolt.Bucket
+	OrigBucket
 	tx   *Tx
 	name string
 }
 
 func newBucket(bk *bolt.Bucket, tx *Tx, name string) *Bucket {
-	res := &Bucket{Bucket: bk, tx: tx}
+	res := &Bucket{OrigBucket: bk, tx: tx}
 	if name != "" {
 		res.name = name
 	}
 	return res
+}
+
+// Bucket .
+func (bk *Bucket) Bucket(name []byte) *Bucket {
+	_bk := bk.OrigBucket.Bucket(name)
+	if _bk == nil {
+		return nil
+	}
+	return newBucket(_bk, bk.tx, string(name))
+}
+
+// CreateBucket .
+func (bk *Bucket) CreateBucket(key []byte) (*Bucket, error) {
+	_bk, err := bk.OrigBucket.CreateBucket(key)
+	if err != nil {
+		return nil, err
+	}
+	return newBucket(_bk, bk.tx, string(key)), nil
+}
+
+// CreateBucketIfNotExists .
+func (bk *Bucket) CreateBucketIfNotExists(key []byte) (*Bucket, error) {
+	_bk, err := bk.OrigBucket.CreateBucketIfNotExists(key)
+	if err != nil {
+		return nil, err
+	}
+	return newBucket(_bk, bk.tx, string(key)), nil
+}
+
+// DeleteBucket .
+func (bk *Bucket) DeleteBucket(key []byte) error {
+	return bk.OrigBucket.DeleteBucket(key)
+}
+
+// Cursor .
+func (bk *Bucket) Cursor() *Cursor {
+	c := bk.OrigBucket.Cursor()
+	if c == nil {
+		return nil
+	}
+	return newCursor(bk, c)
 }
 
 // Delete .
@@ -218,7 +287,7 @@ func (bk *Bucket) Delete(key []byte) error {
 		// TODO: (ERR-A) error ignored (should it be checked? because of the possibility of double delete)
 
 		// delete prev
-		c := keysBucket.Bucket.Cursor()
+		c := keysBucket.OrigBucket.Cursor()
 		var (
 			toDeleteKeys    [][]byte
 			toDeleteIndexes [][]byte
@@ -228,13 +297,13 @@ func (bk *Bucket) Delete(key []byte) error {
 			toDeleteIndexes = append(toDeleteIndexes, v)
 		}
 		for _, v := range toDeleteIndexes {
-			indexBucket.Bucket.Delete(v) // TODO: (ERR-A)
+			indexBucket.OrigBucket.Delete(v) // TODO: (ERR-A)
 		}
 		for _, v := range toDeleteKeys {
-			keysBucket.Bucket.Delete(v) // TODO: (ERR-A)
+			keysBucket.OrigBucket.Delete(v) // TODO: (ERR-A)
 		}
 	}
-	return bk.Bucket.Delete(key)
+	return bk.OrigBucket.Delete(key)
 }
 
 // Put .
@@ -247,7 +316,7 @@ func (bk *Bucket) Put(key []byte, value []byte) error {
 	if err := bk.upsertIndex(key, value); err != nil {
 		return err
 	}
-	return bk.Bucket.Put(key, value)
+	return bk.OrigBucket.Put(key, value)
 }
 
 func (bk *Bucket) upsertIndex(key []byte, value []byte) error {
@@ -280,7 +349,7 @@ func (bk *Bucket) upsertIndex(key []byte, value []byte) error {
 			seg2key := bytes.Join([][]byte{vix, key}, []byte(Sep))
 
 			// delete prev
-			c := keysBucket.Bucket.Cursor()
+			c := keysBucket.OrigBucket.Cursor()
 			var (
 				toDeleteKeys    [][]byte
 				toDeleteIndexes [][]byte
@@ -290,16 +359,16 @@ func (bk *Bucket) upsertIndex(key []byte, value []byte) error {
 				toDeleteIndexes = append(toDeleteIndexes, v)
 			}
 			for _, v := range toDeleteIndexes {
-				indexBucket.Bucket.Delete(v) // TODO: (ERR-A)
+				indexBucket.OrigBucket.Delete(v) // TODO: (ERR-A)
 			}
 			for _, v := range toDeleteKeys {
-				keysBucket.Bucket.Delete(v) // TODO: (ERR-A)
+				keysBucket.OrigBucket.Delete(v) // TODO: (ERR-A)
 			}
 
-			if err := keysBucket.Bucket.Put(key2seg, seg2key); err != nil {
+			if err := keysBucket.OrigBucket.Put(key2seg, seg2key); err != nil {
 				return err
 			}
-			if err := indexBucket.Bucket.Put(seg2key, key); err != nil {
+			if err := indexBucket.OrigBucket.Put(seg2key, key); err != nil {
 				return err
 			}
 		}
@@ -320,6 +389,24 @@ func (bk *Bucket) Tx() *Tx { return bk.tx }
 func (bk *Bucket) isIndex() bool {
 	_, ok := bk.tx.db.indexes[bk.name]
 	return ok
+}
+
+//-----------------------------------------------------------------------------
+
+// OrigCursor .
+type OrigCursor = *bolt.Cursor
+
+// Cursor .
+type Cursor struct {
+	OrigCursor
+	bucket *Bucket
+}
+
+func newCursor(bucket *Bucket, c *bolt.Cursor) *Cursor { return &Cursor{bucket: bucket, OrigCursor: c} }
+
+// Bucket .
+func (c *Cursor) Bucket() *Bucket {
+	return c.bucket
 }
 
 //-----------------------------------------------------------------------------
