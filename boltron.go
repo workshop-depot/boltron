@@ -108,6 +108,33 @@ func (db *DB) AddIndex(indexes ...*Index) error {
 	})
 }
 
+// DropIndex .
+func (db *DB) DropIndex(indexes ...string) (_err error) {
+	defer func() {
+		if _err != nil {
+			return
+		}
+		db.m.Lock()
+		defer db.m.Unlock()
+		for _, v := range indexes {
+			delete(db.indexes, v)
+		}
+	}()
+	db.m.RLock()
+	defer db.m.RUnlock()
+	return db.Update(func(tx *Tx) error {
+		for _, v := range indexes {
+			if err := tx.DeleteBucket([]byte(v)); err != nil {
+				return err
+			}
+			if err := tx.DeleteBucket([]byte(v + bkkeyssuffix)); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
 // RebuildIndex .
 func (db *DB) RebuildIndex(name string) error {
 	var allBuckets []string

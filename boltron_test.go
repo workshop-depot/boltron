@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"os"
 	"path/filepath"
 	"testing"
@@ -11,6 +12,53 @@ import (
 
 	"github.com/stretchr/testify/assert"
 )
+
+func TestDropIndex(t *testing.T) {
+	assert := assert.New(t)
+
+	db, err := Open(tempfile(), 0666, nil)
+	assert.NoError(err)
+	defer os.Remove(db.Path())
+	defer db.Close()
+
+	ix := NewIndex("names", func(k, v []byte) [][]byte {
+		return nil
+	})
+	assert.NoError(db.AddIndex(ix))
+
+	err = db.View(func(tx *Tx) error {
+		bk := tx.Bucket([]byte("names"))
+		assert.NotNil(bk)
+		return nil
+	})
+	assert.NoError(err)
+
+	assert.NoError(db.DropIndex("names"))
+
+	err = db.View(func(tx *Tx) error {
+		bk := tx.Bucket([]byte("names"))
+		assert.Nil(bk)
+		return nil
+	})
+	assert.NoError(err)
+
+	assert.Len(db.indexes, 0)
+}
+
+// tempfile returns a temporary file path.
+func tempfile() string {
+	f, err := ioutil.TempFile("", "bolt-")
+	if err != nil {
+		panic(err)
+	}
+	if err := f.Close(); err != nil {
+		panic(err)
+	}
+	if err := os.Remove(f.Name()); err != nil {
+		panic(err)
+	}
+	return f.Name()
+}
 
 type data struct {
 	ID    string    `json:"id,omitempty"`
